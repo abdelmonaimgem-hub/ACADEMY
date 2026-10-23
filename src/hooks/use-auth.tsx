@@ -6,7 +6,10 @@ import type { User, Session } from '@supabase/supabase-js'
 
 const isLocalMode = () => {
   if (typeof window === 'undefined') return false
-  return !process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL === 'https://your-project-ref.supabase.co'
+  return (
+    !process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL === 'https://your-project-ref.supabase.co'
+  )
 }
 
 interface AuthContextType {
@@ -26,53 +29,84 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let mounted = true
-    createClient().then(client => {
+    createClient().then((client) => {
       if (mounted) setSupabase(client)
     })
+    return () => {
+      mounted = false
+    }
   }, [])
 
   useEffect(() => {
     if (!supabase) return
 
+    let mounted = true
+    let subscription: { unsubscribe: () => void } | undefined
+
     if (isLocalMode()) {
       const checkLocalSession = async () => {
         try {
-          const res = await fetch('/api/auth/session')
+          const savedToken =
+            typeof window !== 'undefined'
+              ? localStorage.getItem('local_token') || 'demo@academy.local'
+              : 'demo@academy.local'
+
+          if (typeof window !== 'undefined' && !localStorage.getItem('local_token')) {
+            localStorage.setItem('local_token', savedToken)
+          }
+
+          const res = await fetch('/api/auth/session', {
+            headers: {
+              Authorization: `Bearer ${savedToken}`,
+            },
+          })
+
           const data = await res.json()
-          if (data.user) {
+
+          if (mounted && data.user) {
             const mockUser = {
               id: data.user.id,
               email: data.user.email,
-              user_metadata: { full_name: data.user.fullName },
+              user_metadata: {
+                full_name:
+                  data.user.user_metadata?.full_name ||
+                  data.user.fullName ||
+                  data.user.email.split('@')[0],
+              },
               role: 'authenticated',
               app_metadata: {},
               aud: 'authenticated',
-              created_at: data.user.createdAt,
+              created_at:
+                data.user.created_at || data.user.createdAt || new Date().toISOString(),
             } as User
-            
+
             const mockSession = {
-              access_token: 'local-token',
+              access_token: savedToken,
               refresh_token: 'local-refresh',
               expires_in: 3600,
               expires_at: Math.floor(Date.now() / 1000) + 3600,
               token_type: 'bearer',
               user: mockUser,
             } as Session
-            
+
             setUser(mockUser)
             setSession(mockSession)
           }
         } catch (err) {
           console.error('Local auth check failed:', err)
         } finally {
-          setLoading(false)
+          if (mounted) setLoading(false)
         }
       }
+
       checkLocalSession()
-      return
+
+      return () => {
+        mounted = false
+      }
     }
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    supabase.auth.getSession().then(({ data: { session } }: any) => {
       if (mounted) {
         setSession(session)
         setUser(session?.user ?? null)
@@ -80,19 +114,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     })
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data } = supabase.auth.onAuthStateChange((_event: string, session: any) => {
       if (mounted) {
         setSession(session)
         setUser(session?.user ?? null)
         setLoading(false)
       }
     })
+    subscription = data?.subscription
 
-    return () => subscription.unsubscribe()
+    return () => {
+      mounted = false
+      subscription?.unsubscribe?.()
+    }
   }, [supabase])
 
   const signOut = async () => {
     if (isLocalMode()) {
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('local_token')
+      }
       await fetch('/api/auth/logout', { method: 'POST' })
       setUser(null)
       setSession(null)

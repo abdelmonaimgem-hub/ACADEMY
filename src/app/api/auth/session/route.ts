@@ -1,56 +1,73 @@
 import { NextRequest, NextResponse } from 'next/server'
-import fs from 'fs'
-import path from 'path'
+import { createClient } from '@/lib/supabase/server-client'
 
-interface MockUser {
-  id: string
-  email: string
-  password: string
-  fullName: string
-  createdAt: string
-  role: 'student' | 'instructor'
-}
-
-const DATA_DIR = path.join(process.cwd(), '.local-data')
-const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json')
-
-function ensureDataDir() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true })
-  }
-  if (!fs.existsSync(SESSIONS_FILE)) {
-    fs.writeFileSync(SESSIONS_FILE, '{}')
-  }
-}
-
-function getSessions(): Record<string, MockUser> {
-  ensureDataDir()
-  try {
-    const data = fs.readFileSync(SESSIONS_FILE, 'utf-8')
-    return JSON.parse(data)
-  } catch {
-    return {}
-  }
-}
-
-function getSession(): MockUser | null {
-  ensureDataDir()
-  const sessions = getSessions()
-  return sessions['current'] || null
+const isLocalMode = () => {
+  return (
+    !process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL === 'https://your-project-ref.supabase.co'
+  )
 }
 
 export async function GET(request: NextRequest) {
   try {
-    const session = getSession()
-    if (!session) {
-      return NextResponse.json({ user: null, session: null })
+    if (isLocalMode()) {
+      let token = ''
+      const authHeader = request.headers.get('authorization')
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        token = authHeader.replace('Bearer ', '').trim()
+      }
+
+      if (!token) {
+        token =
+          request.cookies.get('local_token')?.value ||
+          request.cookies.get('mock_session')?.value ||
+          ''
+      }
+
+      if (!token) {
+        return NextResponse.json({ user: null })
+      }
+
+      const email = token.includes('@') ? token : `${token}@academy.local`
+      const safeId = email.replace(/[^a-zA-Z0-9]/g, '_')
+
+      return NextResponse.json({
+        user: {
+          id: `user_${safeId}`,
+          email,
+          user_metadata: {
+            full_name: email.split('@')[0],
+          },
+          role: 'student',
+          created_at: new Date().toISOString(),
+        },
+      })
     }
+
+    const supabase = await createClient()
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser()
+
+    if (error || !user) {
+      return NextResponse.json({ user: null })
+    }
+
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', user.id)
+      .single()
+
     return NextResponse.json({
-      user: { id: session.id, email: session.email, fullName: session.fullName, role: session.role },
-      session: { user: { id: session.id, email: session.email, fullName: session.fullName, role: session.role } },
+      user: {
+        ...user,
+        profile,
+      },
     })
   } catch (error) {
     console.error('Session error:', error)
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+    return NextResponse.json({ user: null })
   }
 }
