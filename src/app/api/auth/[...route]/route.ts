@@ -1,0 +1,185 @@
+import { NextRequest, NextResponse } from 'next/server'
+import fs from 'fs'
+import path from 'path'
+
+interface MockUser {
+  id: string
+  email: string
+  password: string
+  fullName: string
+  createdAt: string
+  role: 'student' | 'instructor'
+}
+
+const DATA_DIR = path.join(process.cwd(), '.local-data')
+const USERS_FILE = path.join(DATA_DIR, 'users.json')
+const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json')
+
+function ensureDataDir() {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true })
+  }
+  if (!fs.existsSync(USERS_FILE)) {
+    fs.writeFileSync(USERS_FILE, '[]')
+  }
+  if (!fs.existsSync(SESSIONS_FILE)) {
+    fs.writeFileSync(SESSIONS_FILE, '{}')
+  }
+}
+
+function getUsers(): MockUser[] {
+  ensureDataDir()
+  try {
+    const data = fs.readFileSync(USERS_FILE, 'utf-8')
+    return JSON.parse(data)
+  } catch {
+    return []
+  }
+}
+
+function saveUsers(users: MockUser[]) {
+  ensureDataDir()
+  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2))
+}
+
+function getSessions(): Record<string, MockUser> {
+  ensureDataDir()
+  try {
+    const data = fs.readFileSync(SESSIONS_FILE, 'utf-8')
+    return JSON.parse(data)
+  } catch {
+    return {}
+  }
+}
+
+function setSession(user: MockUser | null) {
+  ensureDataDir()
+  const sessions = getSessions()
+  // In a real app, you'd use a proper session ID
+  // For simplicity, we use a fixed key for the current session
+  if (user) {
+    sessions['current'] = user
+  } else {
+    delete sessions['current']
+  }
+  fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2))
+}
+
+function getSession(): MockUser | null {
+  ensureDataDir()
+  const sessions = getSessions()
+  return sessions['current'] || null
+}
+
+function generateId() {
+  return 'user_' + Math.random().toString(36).substring(2, 15)
+}
+
+export async function POST(request: NextRequest) {
+  const url = new URL(request.url)
+  const action = url.searchParams.get('action') || 'signup'
+
+  try {
+    const body = await request.json()
+
+    if (action === 'signup') {
+      const { email, password, fullName, role = 'student' } = body
+
+      if (!email || !password || !fullName) {
+        return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
+      }
+
+      if (password.length < 8) {
+        return NextResponse.json({ error: 'Password must be at least 8 characters' }, { status: 400 })
+      }
+
+      const users = getUsers()
+      const existing = users.find(u => u.email.toLowerCase() === email.toLowerCase())
+
+      if (existing) {
+        return NextResponse.json({ error: 'Email already registered' }, { status: 400 })
+      }
+
+      const newUser: MockUser = {
+        id: generateId(),
+        email: email.toLowerCase(),
+        password,
+        fullName,
+        createdAt: new Date().toISOString(),
+        role,
+      }
+
+      users.push(newUser)
+      saveUsers(users)
+      setSession(newUser)
+
+      return NextResponse.json({
+        user: { id: newUser.id, email: newUser.email, fullName: newUser.fullName, role: newUser.role },
+        session: { user: { id: newUser.id, email: newUser.email, fullName: newUser.fullName, role: newUser.role } },
+      })
+    }
+
+    if (action === 'login') {
+      const { email, password } = body
+
+      if (!email || !password) {
+        return NextResponse.json({ error: 'Missing email or password' }, { status: 400 })
+      }
+
+      const users = getUsers()
+      const user = users.find(
+        u => u.email.toLowerCase() === email.toLowerCase() && u.password === password
+      )
+
+      if (!user) {
+        return NextResponse.json({ error: 'Invalid email or password' }, { status: 401 })
+      }
+
+      setSession(user)
+
+      return NextResponse.json({
+        user: { id: user.id, email: user.email, fullName: user.fullName, role: user.role },
+        session: { user: { id: user.id, email: user.email, fullName: user.fullName, role: user.role } },
+      })
+    }
+
+    if (action === 'logout') {
+      setSession(null)
+      return NextResponse.json({ success: true })
+    }
+
+    if (action === 'session') {
+      const session = getSession()
+      if (!session) {
+        return NextResponse.json({ user: null, session: null })
+      }
+      return NextResponse.json({
+        user: { id: session.id, email: session.email, fullName: session.fullName, role: session.role },
+        session: { user: { id: session.id, email: session.email, fullName: session.fullName, role: session.role } },
+      })
+    }
+
+    return NextResponse.json({ error: 'Invalid action' }, { status: 400 })
+  } catch (error) {
+    console.error('Auth error:', error)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+  }
+}
+
+export async function GET(request: NextRequest) {
+  const url = new URL(request.url)
+  const action = url.searchParams.get('action')
+
+  if (action === 'session') {
+    const session = getSession()
+    if (!session) {
+      return NextResponse.json({ user: null, session: null })
+    }
+    return NextResponse.json({
+      user: { id: session.id, email: session.email, fullName: session.fullName, role: session.role },
+      session: { user: { id: session.id, email: session.email, fullName: session.fullName, role: session.role } },
+    })
+  }
+
+  return NextResponse.json({ error: 'Invalid action' }, { status: 400 })
+}
